@@ -1,6 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getCollection, getMeta, initIndexedDB, setCollection, setMeta } from './indexedDb';
 import { api } from './apiClient';
+import { supabaseDb } from './supabaseClient';
+
+export function getRemote() {
+  if (supabaseDb.isAvailable()) return supabaseDb;
+  return api;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -141,14 +147,18 @@ function writeRaw(key: string, value: string): void {
 }
 
 export async function syncAllFromServer(): Promise<void> {
-  const health = await api.checkHealth();
-  if (!health) return;
+  const isSupabase = supabaseDb.isAvailable();
+  if (!isSupabase) {
+    const health = await api.checkHealth();
+    if (!health) return;
+  }
+  const remote = getRemote();
 
   const current = auth.getCurrentUser();
   if (!current) return;
 
   // Sync users list
-  const serverUsers = await api.getAllUsers();
+  const serverUsers = await remote.getAllUsers();
   if (serverUsers && serverUsers.length > 0) {
     const localUsers = read<User>(KEYS.USERS);
     const map = new Map<string, User>();
@@ -159,7 +169,7 @@ export async function syncAllFromServer(): Promise<void> {
 
   // If patient, sync their profile, daily logs, and snapshots
   if (current.role === 'patient') {
-    const p = await api.getProfile(current.id);
+    const p = await remote.getProfile(current.id);
     if (p) {
       const allProfiles = read<UserProfile>(KEYS.PROFILES);
       const idx = allProfiles.findIndex(x => x.userId === current.id);
@@ -168,14 +178,14 @@ export async function syncAllFromServer(): Promise<void> {
       write(KEYS.PROFILES, allProfiles);
     }
 
-    const logs = await api.getDailyLogs(current.id);
+    const logs = await remote.getDailyLogs(current.id);
     if (logs) {
       const allLogs = read<DailyLog>(KEYS.DAILY_LOGS);
       const otherLogs = allLogs.filter(l => l.userId !== current.id);
       write(KEYS.DAILY_LOGS, [...otherLogs, ...logs]);
     }
 
-    const snaps = await api.getSnapshots(current.id);
+    const snaps = await remote.getSnapshots(current.id);
     if (snaps) {
       const allSnaps = read<MLSnapshot>(KEYS.ML_SNAPSHOTS);
       const otherSnaps = allSnaps.filter(s => s.userId !== current.id);
@@ -184,7 +194,7 @@ export async function syncAllFromServer(): Promise<void> {
   }
 
   // Sync doctor tip reviews
-  const reviews = await api.getTipReviews();
+  const reviews = await remote.getTipReviews();
   if (reviews) {
     write(KEYS.TIP_REVIEWS, reviews);
   }
@@ -263,12 +273,12 @@ export const auth = {
     };
     write(KEYS.USERS, [...users, user]);
     writeRaw(KEYS.CURRENT_USER, user.id);
-    void api.register(name, email, password, role).catch(() => {});
+    void getRemote().register(name, email, password, role).catch(() => {});
     return { success: true, user };
   },
 
   async registerAsync(name: string, email: string, password: string, role: UserRole = 'patient'): Promise<{ success: boolean; error?: string; user?: User }> {
-    const res = await api.register(name, email, password, role);
+    const res = await getRemote().register(name, email, password, role);
     if (res && res.success && res.user) {
       const users = read<User>(KEYS.USERS);
       const updated = users.filter(u => u.id !== res.user!.id);
@@ -294,12 +304,12 @@ export const auth = {
     );
     write(KEYS.USERS, updated);
     writeRaw(KEYS.CURRENT_USER, found.id);
-    void api.login(email, password).catch(() => {});
+    void getRemote().login(email, password).catch(() => {});
     return { success: true, user: { ...found, role: found.role ?? 'patient', lastLogin: new Date().toISOString() } };
   },
 
   async loginAsync(email: string, password: string): Promise<{ success: boolean; error?: string; user?: User }> {
-    const res = await api.login(email, password);
+    const res = await getRemote().login(email, password);
     if (res && res.success && res.user) {
       const users = read<User>(KEYS.USERS);
       const updated = users.filter(u => u.id !== res.user!.id);
@@ -331,7 +341,7 @@ export const auth = {
   },
 
   async syncUsers(): Promise<User[]> {
-    const serverUsers = await api.getAllUsers();
+    const serverUsers = await getRemote().getAllUsers();
     if (serverUsers) {
       const localUsers = read<User>(KEYS.USERS);
       const map = new Map<string, User>();
@@ -352,7 +362,7 @@ export const auth = {
       write(KEYS.USERS, users);
       writeRaw(KEYS.CURRENT_USER, userId);
     }
-    void api.markProfileComplete(userId).catch(() => {});
+    void getRemote().markProfileComplete(userId).catch(() => {});
   },
 
   updateUser(id: string, updates: Partial<Pick<User, 'name'>>): User | null {
@@ -362,7 +372,7 @@ export const auth = {
     users[idx] = { ...users[idx], ...updates };
     write(KEYS.USERS, users);
     if (updates.name) {
-      void api.updateUser(id, updates.name).catch(() => {});
+      void getRemote().updateUser(id, updates.name).catch(() => {});
     }
     return users[idx];
   },
@@ -385,7 +395,7 @@ export const profiles = {
       all.push(updated);
     }
     write(KEYS.PROFILES, all);
-    void api.saveProfile(updated).catch(() => {});
+    void getRemote().saveProfile(updated).catch(() => {});
     return updated;
   },
 
@@ -438,7 +448,7 @@ export const dailyLogs = {
       all.push(saved);
     }
     write(KEYS.DAILY_LOGS, all);
-    void api.saveDailyLog(saved).catch(() => {});
+    void getRemote().saveDailyLog(saved).catch(() => {});
     return saved;
   },
 
@@ -447,7 +457,7 @@ export const dailyLogs = {
       KEYS.DAILY_LOGS,
       read<DailyLog>(KEYS.DAILY_LOGS).filter(l => !(l.userId === userId && l.id === logId))
     );
-    void api.deleteDailyLog(userId, logId).catch(() => {});
+    void getRemote().deleteDailyLog(userId, logId).catch(() => {});
   },
 
   getStreak(userId: string): number {
@@ -493,7 +503,7 @@ export const mlSnapshots = {
       all.push(saved);
     }
     write(KEYS.ML_SNAPSHOTS, all);
-    void api.saveSnapshot(saved).catch(() => {});
+    void getRemote().saveSnapshot(saved).catch(() => {});
     return saved;
   },
 };
@@ -583,7 +593,7 @@ export const tipReviews = {
       });
     }
     write(KEYS.TIP_REVIEWS, all);
-    void api.syncTipReviews(patient, date, recs).catch(() => {});
+    void getRemote().syncTipReviews(patient, date, recs).catch(() => {});
     return all.filter(r => r.patientId === patient.id);
   },
 
@@ -605,7 +615,7 @@ export const tipReviews = {
       reviewedAt: new Date().toISOString(),
     };
     write(KEYS.TIP_REVIEWS, all);
-    void api.setTipStatus(id, status, approvedText, reviewedBy).catch(() => {});
+    void getRemote().setTipStatus(id, status, approvedText, reviewedBy).catch(() => {});
     return all[idx];
   },
 
@@ -641,11 +651,11 @@ export const tipReviews = {
       };
     });
     write(KEYS.TIP_REVIEWS, all);
-    void api.setTipGroup(key, status, text, reviewedBy).catch(() => {});
+    void getRemote().setTipGroup(key, status, text, reviewedBy).catch(() => {});
   },
 
   async syncFromServer(): Promise<TipReview[]> {
-    const reviews = await api.getTipReviews();
+    const reviews = await getRemote().getTipReviews();
     if (reviews) {
       write(KEYS.TIP_REVIEWS, reviews);
       return reviews;
