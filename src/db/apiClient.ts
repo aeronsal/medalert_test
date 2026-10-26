@@ -25,6 +25,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T | null
 
 export const api = {
   async checkHealth(): Promise<{ status: string; mysqlConnected: boolean } | null> {
+    // If running in production (e.g. *.vercel.app), do not attempt loopback requests to localhost
+    if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      return null;
+    }
     return request<{ status: string; mysqlConnected: boolean }>('/health');
   },
 
