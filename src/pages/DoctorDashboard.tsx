@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { format, parseISO } from 'date-fns';
 import {
   Heart, LogOut, Stethoscope, CheckCircle, XCircle, Sun, Moon,
@@ -52,6 +52,11 @@ export default function DoctorDashboard({ darkMode, toggleDark }: Props) {
   const [selfName, setSelfName] = useState('');
 
   const refresh = () => setAll(tipReviews.getAll());
+
+  useEffect(() => {
+    void auth.syncUsers().then(() => refresh());
+    void tipReviews.syncFromServer().then(revs => setAll(revs));
+  }, []);
 
   const showToast = (msg: string, kind: 'ok' | 'err' = 'ok') => {
     setToast({ msg, kind });

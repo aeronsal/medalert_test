@@ -33,9 +33,9 @@ export default function AuthPage({ darkMode, toggleDark }: Props) {
     if (!email.includes('@')) return setError('Please enter a valid email address.');
     setLoading(true);
     await new Promise(r => setTimeout(r, 600));
-    const result = mode === 'login'
+    const result = await (mode === 'login'
       ? login(email, password)
-      : register(name, email, password, role);
+      : register(name, email, password, role));
     setLoading(false);
     if (!result.success) setError(result.error || 'Something went wrong. Please try again.');
   }

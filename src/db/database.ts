@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getCollection, getMeta, initIndexedDB, setCollection, setMeta } from './indexedDb';
+import { api } from './apiClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -139,43 +140,96 @@ function writeRaw(key: string, value: string): void {
   });
 }
 
+export async function syncAllFromServer(): Promise<void> {
+  const health = await api.checkHealth();
+  if (!health) return;
+
+  const current = auth.getCurrentUser();
+  if (!current) return;
+
+  // Sync users list
+  const serverUsers = await api.getAllUsers();
+  if (serverUsers && serverUsers.length > 0) {
+    const localUsers = read<User>(KEYS.USERS);
+    const map = new Map<string, User>();
+    localUsers.forEach(u => map.set(u.id, u));
+    serverUsers.forEach(u => map.set(u.id, { ...map.get(u.id), ...u }));
+    write(KEYS.USERS, Array.from(map.values()));
+  }
+
+  // If patient, sync their profile, daily logs, and snapshots
+  if (current.role === 'patient') {
+    const p = await api.getProfile(current.id);
+    if (p) {
+      const allProfiles = read<UserProfile>(KEYS.PROFILES);
+      const idx = allProfiles.findIndex(x => x.userId === current.id);
+      if (idx >= 0) allProfiles[idx] = p;
+      else allProfiles.push(p);
+      write(KEYS.PROFILES, allProfiles);
+    }
+
+    const logs = await api.getDailyLogs(current.id);
+    if (logs) {
+      const allLogs = read<DailyLog>(KEYS.DAILY_LOGS);
+      const otherLogs = allLogs.filter(l => l.userId !== current.id);
+      write(KEYS.DAILY_LOGS, [...otherLogs, ...logs]);
+    }
+
+    const snaps = await api.getSnapshots(current.id);
+    if (snaps) {
+      const allSnaps = read<MLSnapshot>(KEYS.ML_SNAPSHOTS);
+      const otherSnaps = allSnaps.filter(s => s.userId !== current.id);
+      write(KEYS.ML_SNAPSHOTS, [...otherSnaps, ...snaps]);
+    }
+  }
+
+  // Sync doctor tip reviews
+  const reviews = await api.getTipReviews();
+  if (reviews) {
+    write(KEYS.TIP_REVIEWS, reviews);
+  }
+}
+
 export async function initializeDatabase(): Promise<void> {
   await initIndexedDB();
 
   const alreadyHydrated = await getMeta('med_idb_hydrated');
-  if (alreadyHydrated === 'true') return;
+  if (alreadyHydrated !== 'true') {
+    const mappings: Array<{ key: string; store: 'meta' }> = [
+      { key: KEYS.USERS, store: 'meta' },
+      { key: KEYS.PROFILES, store: 'meta' },
+      { key: KEYS.DAILY_LOGS, store: 'meta' },
+      { key: KEYS.ML_SNAPSHOTS, store: 'meta' },
+      { key: KEYS.CURRENT_USER, store: 'meta' },
+      { key: KEYS.TIP_REVIEWS, store: 'meta' },
+    ];
 
-  const mappings: Array<{ key: string; store: 'meta' }> = [
-    { key: KEYS.USERS, store: 'meta' },
-    { key: KEYS.PROFILES, store: 'meta' },
-    { key: KEYS.DAILY_LOGS, store: 'meta' },
-    { key: KEYS.ML_SNAPSHOTS, store: 'meta' },
-    { key: KEYS.CURRENT_USER, store: 'meta' },
-    { key: KEYS.TIP_REVIEWS, store: 'meta' },
-  ];
-
-  for (const map of mappings) {
-    const localValue = localStorage.getItem(map.key);
-    if (localValue !== null) {
-      try {
-        const parsed = JSON.parse(localValue);
-        await setCollection(map.store, map.key, parsed);
-      } catch {
-        await setCollection(map.store, map.key, localValue);
-      }
-    } else {
-      const idbValue = await getCollection<unknown>(map.store, map.key);
-      if (idbValue !== null) {
-        if (map.key === KEYS.CURRENT_USER && typeof idbValue === 'string') {
-          localStorage.setItem(map.key, idbValue);
-        } else {
-          localStorage.setItem(map.key, JSON.stringify(idbValue));
+    for (const map of mappings) {
+      const localValue = localStorage.getItem(map.key);
+      if (localValue !== null) {
+        try {
+          const parsed = JSON.parse(localValue);
+          await setCollection(map.store, map.key, parsed);
+        } catch {
+          await setCollection(map.store, map.key, localValue);
+        }
+      } else {
+        const idbValue = await getCollection<unknown>(map.store, map.key);
+        if (idbValue !== null) {
+          if (map.key === KEYS.CURRENT_USER && typeof idbValue === 'string') {
+            localStorage.setItem(map.key, idbValue);
+          } else {
+            localStorage.setItem(map.key, JSON.stringify(idbValue));
+          }
         }
       }
     }
+
+    await setMeta('med_idb_hydrated', 'true');
   }
 
-  await setMeta('med_idb_hydrated', 'true');
+  // Background sync from MySQL if backend is running
+  void syncAllFromServer().catch(() => {});
 }
 
 /** Simple hash — NOT for production use */
@@ -205,11 +259,27 @@ export const auth = {
       role,
       createdAt: new Date().toISOString(),
       lastLogin: new Date().toISOString(),
-      profileComplete: false, // always starts incomplete
+      profileComplete: false,
     };
     write(KEYS.USERS, [...users, user]);
     writeRaw(KEYS.CURRENT_USER, user.id);
+    void api.register(name, email, password, role).catch(() => {});
     return { success: true, user };
+  },
+
+  async registerAsync(name: string, email: string, password: string, role: UserRole = 'patient'): Promise<{ success: boolean; error?: string; user?: User }> {
+    const res = await api.register(name, email, password, role);
+    if (res && res.success && res.user) {
+      const users = read<User>(KEYS.USERS);
+      const updated = users.filter(u => u.id !== res.user!.id);
+      write(KEYS.USERS, [...updated, res.user]);
+      writeRaw(KEYS.CURRENT_USER, res.user.id);
+      return res;
+    }
+    if (res && !res.success) {
+      return res;
+    }
+    return auth.register(name, email, password, role);
   },
 
   login(email: string, password: string): { success: boolean; error?: string; user?: User } {
@@ -224,14 +294,29 @@ export const auth = {
     );
     write(KEYS.USERS, updated);
     writeRaw(KEYS.CURRENT_USER, found.id);
+    void api.login(email, password).catch(() => {});
     return { success: true, user: { ...found, role: found.role ?? 'patient', lastLogin: new Date().toISOString() } };
+  },
+
+  async loginAsync(email: string, password: string): Promise<{ success: boolean; error?: string; user?: User }> {
+    const res = await api.login(email, password);
+    if (res && res.success && res.user) {
+      const users = read<User>(KEYS.USERS);
+      const updated = users.filter(u => u.id !== res.user!.id);
+      write(KEYS.USERS, [...updated, res.user]);
+      writeRaw(KEYS.CURRENT_USER, res.user.id);
+      void syncAllFromServer().catch(() => {});
+      return res;
+    }
+    if (res && !res.success) {
+      return res;
+    }
+    return auth.login(email, password);
   },
 
   logout(): void {
     localStorage.removeItem(KEYS.CURRENT_USER);
-    void setCollection('meta', KEYS.CURRENT_USER, '').catch(() => {
-      // Keep the app functional even if IndexedDB is unavailable.
-    });
+    void setCollection('meta', KEYS.CURRENT_USER, '').catch(() => {});
   },
 
   getCurrentUser(): User | null {
@@ -245,15 +330,29 @@ export const auth = {
     return read<User>(KEYS.USERS).map(u => ({ ...u, role: u.role ?? 'patient' }));
   },
 
+  async syncUsers(): Promise<User[]> {
+    const serverUsers = await api.getAllUsers();
+    if (serverUsers) {
+      const localUsers = read<User>(KEYS.USERS);
+      const map = new Map<string, User>();
+      localUsers.forEach(u => map.set(u.id, u));
+      serverUsers.forEach(u => map.set(u.id, { ...map.get(u.id), ...u }));
+      const merged = Array.from(map.values());
+      write(KEYS.USERS, merged);
+      return merged;
+    }
+    return auth.getAll();
+  },
+
   markProfileComplete(userId: string): void {
     const users = read<User>(KEYS.USERS);
     const idx = users.findIndex(u => u.id === userId);
     if (idx !== -1) {
       users[idx] = { ...users[idx], profileComplete: true };
       write(KEYS.USERS, users);
-      // Update current user in storage too (so getCurrentUser reflects it)
       writeRaw(KEYS.CURRENT_USER, userId);
     }
+    void api.markProfileComplete(userId).catch(() => {});
   },
 
   updateUser(id: string, updates: Partial<Pick<User, 'name'>>): User | null {
@@ -262,6 +361,9 @@ export const auth = {
     if (idx === -1) return null;
     users[idx] = { ...users[idx], ...updates };
     write(KEYS.USERS, users);
+    if (updates.name) {
+      void api.updateUser(id, updates.name).catch(() => {});
+    }
     return users[idx];
   },
 };
@@ -283,6 +385,7 @@ export const profiles = {
       all.push(updated);
     }
     write(KEYS.PROFILES, all);
+    void api.saveProfile(updated).catch(() => {});
     return updated;
   },
 
@@ -335,6 +438,7 @@ export const dailyLogs = {
       all.push(saved);
     }
     write(KEYS.DAILY_LOGS, all);
+    void api.saveDailyLog(saved).catch(() => {});
     return saved;
   },
 
@@ -343,6 +447,7 @@ export const dailyLogs = {
       KEYS.DAILY_LOGS,
       read<DailyLog>(KEYS.DAILY_LOGS).filter(l => !(l.userId === userId && l.id === logId))
     );
+    void api.deleteDailyLog(userId, logId).catch(() => {});
   },
 
   getStreak(userId: string): number {
@@ -388,6 +493,7 @@ export const mlSnapshots = {
       all.push(saved);
     }
     write(KEYS.ML_SNAPSHOTS, all);
+    void api.saveSnapshot(saved).catch(() => {});
     return saved;
   },
 };
@@ -477,6 +583,7 @@ export const tipReviews = {
       });
     }
     write(KEYS.TIP_REVIEWS, all);
+    void api.syncTipReviews(patient, date, recs).catch(() => {});
     return all.filter(r => r.patientId === patient.id);
   },
 
@@ -498,6 +605,7 @@ export const tipReviews = {
       reviewedAt: new Date().toISOString(),
     };
     write(KEYS.TIP_REVIEWS, all);
+    void api.setTipStatus(id, status, approvedText, reviewedBy).catch(() => {});
     return all[idx];
   },
 
@@ -533,5 +641,15 @@ export const tipReviews = {
       };
     });
     write(KEYS.TIP_REVIEWS, all);
+    void api.setTipGroup(key, status, text, reviewedBy).catch(() => {});
+  },
+
+  async syncFromServer(): Promise<TipReview[]> {
+    const reviews = await api.getTipReviews();
+    if (reviews) {
+      write(KEYS.TIP_REVIEWS, reviews);
+      return reviews;
+    }
+    return tipReviews.getAll();
   },
 };

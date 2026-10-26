@@ -4,8 +4,8 @@ import { auth, User, UserRole } from '../db/database';
 interface AuthContextValue {
   user: User | null;
   isAuthenticated: boolean;
-  login:  (email: string, password: string) => { success: boolean; error?: string };
-  register: (name: string, email: string, password: string, role?: UserRole) => { success: boolean; error?: string };
+  login:  (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  register: (name: string, email: string, password: string, role?: UserRole) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   refreshUser: () => void;
   completeProfile: () => void;
@@ -16,14 +16,14 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => auth.getCurrentUser());
 
-  const login = useCallback((email: string, password: string) => {
-    const result = auth.login(email, password);
+  const login = useCallback(async (email: string, password: string) => {
+    const result = await auth.loginAsync(email, password);
     if (result.success && result.user) setUser(result.user);
     return { success: result.success, error: result.error };
   }, []);
 
-  const register = useCallback((name: string, email: string, password: string, role: UserRole = 'patient') => {
-    const result = auth.register(name, email, password, role);
+  const register = useCallback(async (name: string, email: string, password: string, role: UserRole = 'patient') => {
+    const result = await auth.registerAsync(name, email, password, role);
     if (result.success && result.user) setUser(result.user);
     return { success: result.success, error: result.error };
   }, []);
