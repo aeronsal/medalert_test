@@ -2,9 +2,24 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { clientEnv } from '../config/env';
 import { User, UserProfile, DailyLog, MLSnapshot, TipReview, TipRecInput, UserRole } from './database';
 
-export const supabase: SupabaseClient | null = clientEnv.isSupabaseConfigured
-  ? createClient(clientEnv.supabaseUrl, clientEnv.supabaseAnonKey)
+const rawUrl = (clientEnv.supabaseUrl || '').trim();
+const cleanUrl = rawUrl.replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '');
+const cleanKey = (clientEnv.supabaseAnonKey || '').trim();
+
+export const supabase: SupabaseClient | null = (cleanUrl && cleanKey)
+  ? createClient(cleanUrl, cleanKey)
   : null;
+
+if (typeof window !== 'undefined') {
+  if (supabase) {
+    console.log('[MedAlert] Supabase initialized successfully:', cleanUrl);
+  } else {
+    console.warn('[MedAlert] Supabase NOT active. Running in local/IndexedDB mode.', {
+      hasUrl: Boolean(rawUrl),
+      hasKey: Boolean(cleanKey),
+    });
+  }
+}
 
 function simpleHash(str: string): string {
   let hash = 0;
